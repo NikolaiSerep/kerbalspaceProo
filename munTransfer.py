@@ -18,14 +18,26 @@ def engage(vessel, space_center, connection):
     mun_semi_major = mun_orbit.semi_major_axis
     mun_radius = mun_orbit.radius
 
-    # Расчёт оптимального фазового угла (один раз)
-    # Большая полуось переходного эллипса (упрощённо, но автор использовал именно так)
-    # Для точности лучше взять (vessel.orbit.radius + mun_radius)/2, но в оригинале mun_semi_major/2
-    # Оставим как в оригинале, но можно уточнить
-    hohmann_semi_major = mun_semi_major / 2
-    # Угол, на который сместится Луна за половину периода переходной орбиты
-    needed_phase = 2 * math.pi * (1 / (2 * ((mun_semi_major**3 / hohmann_semi_major**3) ** 0.5)))
-    optimal_phase_angle = 180 - needed_phase * 180 / math.pi
+    # ---- Точный расчёт оптимального фазового угла ----
+    r1 = vessel.orbit.radius
+    r2 = mun_semi_major  # или mun_orbit.radius (оба практически равны для круговой орбиты)
+    mu = vessel.orbit.body.gravitational_parameter
+
+    # Период переходного эллипса (половина периода)
+    a_transfer = (r1 + r2) / 2
+    T_transfer = math.pi * math.sqrt(a_transfer**3 / mu)
+
+    # Угловая скорость Муны
+    omega_mun = math.sqrt(mu / r2**3)
+
+    # Угол, на который сместится Муна за время перелёта
+    theta = omega_mun * T_transfer
+
+    # Оптимальный фазовый угол (в радианах) – отставание корабля от Муны
+    optimal_phase_rad = math.pi - theta
+    optimal_phase_angle = math.degrees(optimal_phase_rad)
+
+    print(f"Оптимальный фазовый угол: {optimal_phase_angle:.2f}°")
 
     # Ожидание нужного фазового угла
     vessel.auto_pilot.engage()
@@ -73,8 +85,8 @@ def engage(vessel, space_center, connection):
             space_center.rails_warp_factor = 4
 
         prev_phase = phase_angle
-        print("Phase angle: {:.2f} deg".format(phase_angle))
-        sleep(1)  # пауза между измерениями
+        print("Фазовый угол: {:.2f}".format(phase_angle))
+        sleep(0.2)  # пауза между измерениями
 
     # Выключаем варп, если он ещё включён
     space_center.rails_warp_factor = 0
@@ -101,14 +113,12 @@ def engage(vessel, space_center, connection):
     while deltaV > actual_dv:
         sleep(0.15)
         # Текущая скорость 
-        # Но здесь оставим vis-viva для согласованности с оригиналом
         r = vessel.orbit.radius
         a_current = vessel.orbit.semi_major_axis
         v_current = math.sqrt(GM * (2.0/r - 1.0/a_current))
         actual_dv = v_current - v_initial
-        print("DeltaV so far: {:.2f} out of needed {:.2f}".format(actual_dv, deltaV))
+        print("DeltaV пока: {:.2f} необходимо {:.2f}".format(actual_dv, deltaV))
 
     vessel.control.throttle = 0.0
     vessel.auto_pilot.disengage()
-    print("We should have a mun encounter!")
-    print()
+    print("встреча с лунойстан!")

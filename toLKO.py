@@ -2,64 +2,42 @@ import krpc
 from time import sleep
 
 def engage(vessel, space_center, connection, ascentProfileConstant=1.25):
-    """
-    Выводит корабль на низкую опорную орбиту Кербина (LKO) с целевыми параметрами:
-    апогей ~75 км, перигей ~70 км.
-    Параметр ascentProfileConstant управляет крутизной гравитационного разворота.
-    """
-    # Включаем систему реактивного управления (RCS) для лучшей стабилизации на взлёте
     vessel.control.rcs = True
-
-    # Полный газ с самого старта
     vessel.control.throttle = 1
 
-    # Создаём поток для отслеживания текущей высоты апогея в реальном времени
     apoapsisStream = connection.add_stream(getattr, vessel.orbit, 'apoapsis_altitude')
 
-    # Включаем автопилот и задаём начальный курс 90° (строго на восток)
     vessel.auto_pilot.engage()
     vessel.auto_pilot.target_heading = 90
-
-    # -------------------------------------------------------------------------
-    # ЭТАП 1: Гравитационный разворот и набор высоты до достижения апогея 75 км
-    # -------------------------------------------------------------------------
-    while apoapsisStream() < 75000:
-        # Вычисляем целевой угол тангажа (от вертикали) по мере роста апогея.
-        # Формула: targetPitch = 90 - k * (apoapsis ** ascentProfileConstant)
-        # где k = 90 / (75000 ** ascentProfileConstant)
-        # При старте (apoapsis мал) targetPitch близок к 90° (почти вертикально вверх).
-        # По мере приближения апогея к 75 км targetPitch стремится к 0° (горизонтально).
-        targetPitch = 90 - ((90 / (75000 ** ascentProfileConstant)) *
-                            (apoapsisStream() ** ascentProfileConstant))
+    # ЭТАП 1: Гравитационный разворот
+    target_apoapsis = 75000
+    shutdown_margin = 1500  
+    while apoapsisStream() < target_apoapsis - shutdown_margin:
+        # Расчёт целевого тангажа 
+        k = 90 / (target_apoapsis ** ascentProfileConstant)
+        targetPitch = 90 - k * (apoapsisStream() ** ascentProfileConstant)
+        # Ограничиваем от 0 до 90
+        targetPitch = max(0, min(90, targetPitch))
         print("Текущий целевой тангаж:", targetPitch, "при апогее", apoapsisStream())
 
-        # Задаём автопилоту новый угол тангажа
         vessel.auto_pilot.target_pitch = targetPitch
+        sleep(0.1)
 
-        sleep(0.1)  # Небольшая пауза для стабильности управления
-
-    # Как только апогей достиг 75 км, отключаем двигатель
     vessel.control.throttle = 0
+    print("Двигатель выключен. Текущий апогей:", apoapsisStream())
 
-    # -------------------------------------------------------------------------
-    # ЭТАП 2: Подготовка к циркуляризационному импульсу
-    # -------------------------------------------------------------------------
-    # Создаём потоки для отслеживания времени до апогея и высоты перигея
+    # ЭТАП 2: Ожидание подлёта к апогею
     timeToApoapsisStream = connection.add_stream(getattr, vessel.orbit, 'time_to_apoapsis')
     periapsisStream = connection.add_stream(getattr, vessel.orbit, 'periapsis_altitude')
 
-    # Ожидаем, пока до апогея не останется около 22 секунд.
-    # Во время ожидания используем ускорение времени для экономии реального времени.
     while timeToApoapsisStream() > 22:
         if timeToApoapsisStream() > 60:
-            # Если времени много, включаем высокую скорость варпа (4x)
             space_center.rails_warp_factor = 4
         else:
-            # Приближаясь к моменту манёвра, выключаем варп
             space_center.rails_warp_factor = 0
         sleep(0.5)
-
-    # -------------------------------------------------------------------------
+    space_center.rails_warp_factor = 0
+    
     # ЭТАП 3: Циркуляризация
     vessel.control.throttle = 0.5
     lastUT = space_center.ut
@@ -71,17 +49,19 @@ def engage(vessel, space_center, connection, ascentProfileConstant=1.25):
         timeToAp = timeToApoapsisStream()
         UT = space_center.ut
         dt = UT - lastUT
-        if dt < 0.001:
+        if dt < 0.001:  # защита от деления на ноль
             continue
         delta = (timeToAp - lastTimeToAp) / dt
+
+        # Скользящее среднее
         delta_history.append(delta)
         if len(delta_history) > 5:
             delta_history.pop(0)
         smoothed_delta = sum(delta_history) / len(delta_history)
-        
+
         print(f"Сглаженная оценка: {smoothed_delta:.3f}")
-        
-        # Коррекция тяги
+
+        # Коррекция тяги с ограничением шага
         if smoothed_delta < -0.3:
             vessel.control.throttle = min(1.0, vessel.control.throttle + 0.03)
         elif smoothed_delta < -0.1:
@@ -90,13 +70,15 @@ def engage(vessel, space_center, connection, ascentProfileConstant=1.25):
             vessel.control.throttle = max(0.0, vessel.control.throttle - 0.03)
         elif smoothed_delta > 0:
             vessel.control.throttle = max(0.0, vessel.control.throttle - 0.01)
-        
+
+        # Ограничиваем тягу, чтобы не выйти за пределы
+        vessel.control.throttle = max(0.05, min(1.0, vessel.control.throttle))
+
         lastTimeToAp = timeToAp
         lastUT = UT
 
     vessel.control.throttle = 0
 
-    # Выводим финальные параметры орбиты для контроля
     print("Апогей: ", apoapsisStream())
     print("Перигей: ", periapsisStream())
     print("Орбита достигнута!")
